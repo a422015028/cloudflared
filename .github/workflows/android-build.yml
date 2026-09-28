@@ -192,6 +192,7 @@ jobs:
           RELEASE_NAME: ${{ steps.release_info.outputs.release_name }}
         run: |
           gh release create "$VERSION" \
+            --repo "${{ github.repository }}" \
             --title "$RELEASE_NAME" \
             --notes-file release_body.md \
             artifacts/${{ env.BINARY_NAME }}-${VERSION}-android-arm64-v8a \
