@@ -9,7 +9,7 @@ on:
 env:
   GO_VERSION: '1.26.x'
   BINARY_NAME: cloudflared
-  ANDROID_NDK_VERSION: '27.0.12077973'
+  ANDROID_NDK_VERSION: '26.3.11579264'
   ANDROID_API_LEVEL: '24'
   OFFICIAL_REPO: 'cloudflare/cloudflared'
 
@@ -101,11 +101,10 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - name: Set up Android NDK
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: ${{ env.ANDROID_NDK_VERSION }}
-          local-cache: true
+      - name: Install Android NDK
+        run: |
+          yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --install "ndk;${{ env.ANDROID_NDK_VERSION }}"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/${{ env.ANDROID_NDK_VERSION }}" >> $GITHUB_ENV
 
       - name: Build cloudflared for Android ${{ matrix.arch }}
         env:
