@@ -16,7 +16,7 @@ env:
 jobs:
   check-version:
     name: Check for new official release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       should_build: ${{ steps.check.outputs.should_build }}
       official_version: ${{ steps.check.outputs.official_version }}
@@ -62,7 +62,7 @@ jobs:
     name: Build Android (${{ matrix.arch }})
     needs: check-version
     if: needs.check-version.outputs.should_build == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -90,14 +90,14 @@ jobs:
 
     steps:
       - name: Checkout official source at ${{ needs.check-version.outputs.official_version }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ env.OFFICIAL_REPO }}
           ref: ${{ needs.check-version.outputs.official_version }}
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
 
@@ -135,7 +135,7 @@ jobs:
           ls -lh "$OUTPUT"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ${{ env.BINARY_NAME }}-android-${{ matrix.arch }}
           path: |
@@ -147,12 +147,12 @@ jobs:
     name: Create GitHub Release
     needs: [check-version, build-android]
     if: needs.check-version.outputs.should_build == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
       - name: Download all build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: artifacts
           pattern: ${{ env.BINARY_NAME }}-android-*
@@ -162,7 +162,7 @@ jobs:
         run: |
           ls -lh artifacts/
 
-      - name: Fetch official release body
+      - name: Prepare release body
         id: release_info
         run: |
           VERSION="${{ needs.check-version.outputs.official_version }}"
@@ -186,14 +186,15 @@ jobs:
           echo "| x86_64 | \`${{ env.BINARY_NAME }}-$VERSION-android-x86_64\` |" >> release_body.md
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.check-version.outputs.official_version }}
-          name: ${{ steps.release_info.outputs.release_name }}
-          body_path: release_body.md
-          files: |
-            artifacts/${{ env.BINARY_NAME }}-${{ needs.check-version.outputs.official_version }}-android-*
-          fail_on_unmatched_files: true
-          generate_release_notes: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.check-version.outputs.official_version }}
+          RELEASE_NAME: ${{ steps.release_info.outputs.release_name }}
+        run: |
+          gh release create "$VERSION" \
+            --title "$RELEASE_NAME" \
+            --notes-file release_body.md \
+            artifacts/${{ env.BINARY_NAME }}-${VERSION}-android-arm64-v8a \
+            artifacts/${{ env.BINARY_NAME }}-${VERSION}-android-armeabi-v7a \
+            artifacts/${{ env.BINARY_NAME }}-${VERSION}-android-x86 \
+            artifacts/${{ env.BINARY_NAME }}-${VERSION}-android-x86_64
