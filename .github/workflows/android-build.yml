@@ -63,6 +63,8 @@ jobs:
     needs: check-version
     if: needs.check-version.outputs.should_build == 'true'
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -125,77 +127,68 @@ jobs:
           OUTPUT="${{ env.BINARY_NAME }}-${VERSION}-android-${{ matrix.arch }}"
           go build -mod=readonly -trimpath -ldflags "$LDFLAGS_VALUE" -o "$OUTPUT" github.com/cloudflare/cloudflared/cmd/cloudflared
 
-          # 同时生成一个不带版本号的别名，方便引用
-          cp "$OUTPUT" "${{ env.BINARY_NAME }}-android-${{ matrix.arch }}"
-
       - name: Verify binary
         run: |
           OUTPUT="${{ env.BINARY_NAME }}-${{ needs.check-version.outputs.official_version }}-android-${{ matrix.arch }}"
           file "$OUTPUT"
           ls -lh "$OUTPUT"
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v5
-        with:
-          name: ${{ env.BINARY_NAME }}-android-${{ matrix.arch }}
-          path: |
-            ${{ env.BINARY_NAME }}-${{ needs.check-version.outputs.official_version }}-android-${{ matrix.arch }}
-            ${{ env.BINARY_NAME }}-android-${{ matrix.arch }}
-          if-no-files-found: error
+      - name: Upload binary to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.check-version.outputs.official_version }}
+        run: |
+          BINARY="${{ env.BINARY_NAME }}-${VERSION}-android-${{ matrix.arch }}"
+
+          # 检查 release 是否已存在，存在则上传，不存在则先创建草稿
+          if gh release view "$VERSION" --repo "${{ github.repository }}" > /dev/null 2>&1; then
+            gh release upload "$VERSION" "$BINARY" --repo "${{ github.repository }}" --clobber
+          else
+            gh release create "$VERSION" "$BINARY" \
+              --repo "${{ github.repository }}" \
+              --title "$VERSION" \
+              --notes "_Android builds for $VERSION_" \
+              --draft
+          fi
 
   release:
-    name: Create GitHub Release
+    name: Publish Release
     needs: [check-version, build-android]
     if: needs.check-version.outputs.should_build == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
-      - name: Download all build artifacts
-        uses: actions/download-artifact@v5
-        with:
-          path: artifacts
-          pattern: ${{ env.BINARY_NAME }}-android-*
-          merge-multiple: true
-
-      - name: List artifacts
+      - name: Finalize release notes and publish
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.check-version.outputs.official_version }}
         run: |
-          ls -lh artifacts/
-
-      - name: Prepare release body
-        id: release_info
-        run: |
-          VERSION="${{ needs.check-version.outputs.official_version }}"
+          # 获取官方 release 标题
           RELEASE_DATA=$(curl -sL "https://api.github.com/repos/${{ env.OFFICIAL_REPO }}/releases/tags/$VERSION")
+          RELEASE_NAME=$(echo "$RELEASE_DATA" | jq -r '.name')
 
-          # 获取官方 release 的标题和正文
-          echo "release_name=$(echo "$RELEASE_DATA" | jq -r '.name')" >> $GITHUB_OUTPUT
-          echo "$RELEASE_DATA" | jq -r '.body' > release_body.md
-          echo "" >> release_body.md
-          echo "---" >> release_body.md
-          echo "" >> release_body.md
-          echo "## Android Builds" >> release_body.md
-          echo "" >> release_body.md
-          echo "Additional Android binaries built from official source tag \`$VERSION\`." >> release_body.md
-          echo "" >> release_body.md
-          echo "| Architecture | Binary |" >> release_body.md
-          echo "|---|---|" >> release_body.md
+          # 只写 Android 相关的 release notes，不带官方 SHA256
+          cat > release_body.md <<'BODY'
+          Android builds of cloudflared, built from the official source tag.
+
+          ## Android Binaries
+
+          | Architecture | Binary |
+          |---|---|
+          BODY
+
           echo "| arm64-v8a | \`${{ env.BINARY_NAME }}-$VERSION-android-arm64-v8a\` |" >> release_body.md
           echo "| armeabi-v7a | \`${{ env.BINARY_NAME }}-$VERSION-android-armeabi-v7a\` |" >> release_body.md
           echo "| x86 | \`${{ env.BINARY_NAME }}-$VERSION-android-x86\` |" >> release_body.md
           echo "| x86_64 | \`${{ env.BINARY_NAME }}-$VERSION-android-x86_64\` |" >> release_body.md
 
-      - name: Create GitHub Release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ needs.check-version.outputs.official_version }}
-          RELEASE_NAME: ${{ steps.release_info.outputs.release_name }}
-        run: |
-          gh release create "$VERSION" \
+          echo "" >> release_body.md
+          echo "> Source: [cloudflare/cloudflared@$VERSION](https://github.com/${{ env.OFFICIAL_REPO }}/releases/tag/$VERSION)" >> release_body.md
+
+          # 编辑草稿 release，更新标题和正文，取消草稿状态发布
+          gh release edit "$VERSION" \
             --repo "${{ github.repository }}" \
             --title "$RELEASE_NAME" \
             --notes-file release_body.md \
-            artifacts/${{ env.BINARY_NAME }}-${VERSION}-android-arm64-v8a \
-            artifacts/${{ env.BINARY_NAME }}-${VERSION}-android-armeabi-v7a \
-            artifacts/${{ env.BINARY_NAME }}-${VERSION}-android-x86 \
-            artifacts/${{ env.BINARY_NAME }}-${VERSION}-android-x86_64
+            --draft=false
