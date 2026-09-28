@@ -62,14 +62,13 @@ jobs:
           CGO_ENABLED: '0'
         run: |
           BUILD_DATE=$(git log -1 --format="%ad" --date=format-local:'%Y-%m-%dT%H:%M UTC' -- RELEASE_NOTES)
-          VERSION_FLAGS="-X \"main.Version=${{ steps.version.outputs.version }}\" -X \"main.BuildTime=$BUILD_DATE\""
-          LDFLAGS="-ldflags='${VERSION_FLAGS}'"
+          LDFLAGS_VALUE="-X main.Version=${{ steps.version.outputs.version }} -X main.BuildTime=$BUILD_DATE"
 
           if [ -n "$GOARM" ]; then
             export GOARM
           fi
 
-          go build -mod=readonly -trimpath $LDFLAGS -o ${{ env.BINARY_NAME }}-${{ matrix.arch }} github.com/cloudflare/cloudflared/cmd/cloudflared
+          go build -mod=readonly -trimpath -ldflags "$LDFLAGS_VALUE" -o ${{ env.BINARY_NAME }}-${{ matrix.arch }} github.com/cloudflare/cloudflared/cmd/cloudflared
 
       - name: Verify binary
         run: |
