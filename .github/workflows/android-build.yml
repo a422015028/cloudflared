@@ -1,21 +1,67 @@
-name: Android Build
+name: Android Build & Release
 
 on:
-  push:
-    branches: [master, main]
-    tags:
-      - '*'
-  pull_request:
-    branches: [master, main]
+  schedule:
+    # 每天 UTC 0 点检查一次官方是否有新版本
+    - cron: '0 0 * * *'
   workflow_dispatch:
 
 env:
   GO_VERSION: '1.26.x'
   BINARY_NAME: cloudflared
+  ANDROID_NDK_VERSION: '27.0.12077973'
+  ANDROID_API_LEVEL: '24'
+  OFFICIAL_REPO: 'cloudflare/cloudflared'
 
 jobs:
+  check-version:
+    name: Check for new official release
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+      official_version: ${{ steps.check.outputs.official_version }}
+      local_version: ${{ steps.check.outputs.local_version }}
+    steps:
+      - name: Get official latest release
+        id: official
+        run: |
+          OFFICIAL_TAG=$(curl -sL "https://api.github.com/repos/${{ env.OFFICIAL_REPO }}/releases/latest" | jq -r '.tag_name')
+          if [ -z "$OFFICIAL_TAG" ] || [ "$OFFICIAL_TAG" = "null" ]; then
+            echo "Failed to fetch official latest release"
+            exit 1
+          fi
+          echo "official_tag=$OFFICIAL_TAG" >> $GITHUB_OUTPUT
+          echo "Official latest: $OFFICIAL_TAG"
+
+      - name: Get local latest release
+        id: local
+        run: |
+          LOCAL_TAG=$(curl -sL -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/latest" | jq -r '.tag_name // empty')
+          echo "local_tag=$LOCAL_TAG" >> $GITHUB_OUTPUT
+          echo "Local latest: ${LOCAL_TAG:-(none)}"
+
+      - name: Compare versions
+        id: check
+        run: |
+          OFFICIAL="${{ steps.official.outputs.official_tag }}"
+          LOCAL="${{ steps.local.outputs.local_tag }}"
+
+          echo "official_version=$OFFICIAL" >> $GITHUB_OUTPUT
+          echo "local_version=$LOCAL" >> $GITHUB_OUTPUT
+
+          if [ "$OFFICIAL" != "$LOCAL" ]; then
+            echo "New version available: $LOCAL -> $OFFICIAL"
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          else
+            echo "Already up to date: $OFFICIAL"
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          fi
+
   build-android:
     name: Build Android (${{ matrix.arch }})
+    needs: check-version
+    if: needs.check-version.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -25,23 +71,29 @@ jobs:
             goos: android
             goarch: arm64
             goarm: ''
+            ndk_triplet: aarch64-linux-android
           - arch: armeabi-v7a
             goos: android
             goarch: arm
             goarm: '7'
+            ndk_triplet: armv7a-linux-androideabi
           - arch: x86
             goos: android
             goarch: '386'
             goarm: ''
+            ndk_triplet: i686-linux-android
           - arch: x86_64
             goos: android
             goarch: amd64
             goarm: ''
+            ndk_triplet: x86_64-linux-android
 
     steps:
-      - name: Checkout code
+      - name: Checkout official source at ${{ needs.check-version.outputs.official_version }}
         uses: actions/checkout@v4
         with:
+          repository: ${{ env.OFFICIAL_REPO }}
+          ref: ${{ needs.check-version.outputs.official_version }}
           fetch-depth: 0
 
       - name: Set up Go
@@ -49,63 +101,100 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - name: Get version
-        id: version
-        run: echo "version=$(git describe --tags --always --match "[0-9][0-9][0-9][0-9].*.*")" >> $GITHUB_OUTPUT
-        shell: bash
+      - name: Set up Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: ${{ env.ANDROID_NDK_VERSION }}
+          local-cache: true
 
       - name: Build cloudflared for Android ${{ matrix.arch }}
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           GOARM: ${{ matrix.goarm }}
-          CGO_ENABLED: '0'
+          CGO_ENABLED: '1'
+          CC: ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/${{ matrix.ndk_triplet }}${{ env.ANDROID_API_LEVEL }}-clang
         run: |
+          VERSION="${{ needs.check-version.outputs.official_version }}"
           BUILD_DATE=$(git log -1 --format="%ad" --date=format-local:'%Y-%m-%dT%H:%M UTC' -- RELEASE_NOTES)
-          LDFLAGS_VALUE="-X \"main.Version=${{ steps.version.outputs.version }}\" -X \"main.BuildTime=$BUILD_DATE\""
+          LDFLAGS_VALUE="-X \"main.Version=$VERSION\" -X \"main.BuildTime=$BUILD_DATE\""
 
           if [ -n "$GOARM" ]; then
             export GOARM
           fi
 
-          go build -mod=readonly -trimpath -ldflags "$LDFLAGS_VALUE" -o ${{ env.BINARY_NAME }}-${{ matrix.arch }} github.com/cloudflare/cloudflared/cmd/cloudflared
+          OUTPUT="${{ env.BINARY_NAME }}-${VERSION}-android-${{ matrix.arch }}"
+          go build -mod=readonly -trimpath -ldflags "$LDFLAGS_VALUE" -o "$OUTPUT" github.com/cloudflare/cloudflared/cmd/cloudflared
+
+          # 同时生成一个不带版本号的别名，方便引用
+          cp "$OUTPUT" "${{ env.BINARY_NAME }}-android-${{ matrix.arch }}"
 
       - name: Verify binary
         run: |
-          file ${{ env.BINARY_NAME }}-${{ matrix.arch }}
-          ls -lh ${{ env.BINARY_NAME }}-${{ matrix.arch }}
+          OUTPUT="${{ env.BINARY_NAME }}-${{ needs.check-version.outputs.official_version }}-android-${{ matrix.arch }}"
+          file "$OUTPUT"
+          ls -lh "$OUTPUT"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.BINARY_NAME }}-android-${{ matrix.arch }}
-          path: ${{ env.BINARY_NAME }}-${{ matrix.arch }}
+          path: |
+            ${{ env.BINARY_NAME }}-${{ needs.check-version.outputs.official_version }}-android-${{ matrix.arch }}
+            ${{ env.BINARY_NAME }}-android-${{ matrix.arch }}
           if-no-files-found: error
 
-  # 汇总所有架构到一个 artifact（可选）
-  package-all:
-    name: Package all Android architectures
-    needs: build-android
+  release:
+    name: Create GitHub Release
+    needs: [check-version, build-android]
+    if: needs.check-version.outputs.should_build == 'true'
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write
     steps:
-      - name: Download all artifacts
+      - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
           pattern: ${{ env.BINARY_NAME }}-android-*
-          merge-multiple: false
+          merge-multiple: true
 
-      - name: Create combined archive
+      - name: List artifacts
         run: |
-          mkdir -p output
-          VERSION=${GITHUB_REF_NAME:-latest}
-          tar -czf output/${{ env.BINARY_NAME }}-android-all-${VERSION}.tar.gz -C artifacts .
-          ls -lh output/
+          ls -lh artifacts/
 
-      - name: Upload combined archive
-        uses: actions/upload-artifact@v4
+      - name: Fetch official release body
+        id: release_info
+        run: |
+          VERSION="${{ needs.check-version.outputs.official_version }}"
+          RELEASE_DATA=$(curl -sL "https://api.github.com/repos/${{ env.OFFICIAL_REPO }}/releases/tags/$VERSION")
+
+          # 获取官方 release 的标题和正文
+          echo "release_name=$(echo "$RELEASE_DATA" | jq -r '.name')" >> $GITHUB_OUTPUT
+          echo "$RELEASE_DATA" | jq -r '.body' > release_body.md
+          echo "" >> release_body.md
+          echo "---" >> release_body.md
+          echo "" >> release_body.md
+          echo "## Android Builds" >> release_body.md
+          echo "" >> release_body.md
+          echo "Additional Android binaries built from official source tag \`$VERSION\`." >> release_body.md
+          echo "" >> release_body.md
+          echo "| Architecture | Binary |" >> release_body.md
+          echo "|---|---|" >> release_body.md
+          echo "| arm64-v8a | \`${{ env.BINARY_NAME }}-$VERSION-android-arm64-v8a\` |" >> release_body.md
+          echo "| armeabi-v7a | \`${{ env.BINARY_NAME }}-$VERSION-android-armeabi-v7a\` |" >> release_body.md
+          echo "| x86 | \`${{ env.BINARY_NAME }}-$VERSION-android-x86\` |" >> release_body.md
+          echo "| x86_64 | \`${{ env.BINARY_NAME }}-$VERSION-android-x86_64\` |" >> release_body.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: ${{ env.BINARY_NAME }}-android-all
-          path: output/*
-          if-no-files-found: error
+          tag_name: ${{ needs.check-version.outputs.official_version }}
+          name: ${{ steps.release_info.outputs.release_name }}
+          body_path: release_body.md
+          files: |
+            artifacts/${{ env.BINARY_NAME }}-${{ needs.check-version.outputs.official_version }}-android-*
+          fail_on_unmatched_files: true
+          generate_release_notes: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
